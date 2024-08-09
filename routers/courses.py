@@ -12,31 +12,45 @@ router=APIRouter()
 
 
 #Endpoint to get a list of all available courses.
-@router.get("/courses",response_model=schema.CoursesResponse)
+@router.get("/courses", response_model=schema.CoursesResponse)
 async def get_courses(
     sort_by: str = Query("name", enum=["name", "date", "rating"]),
     sort_order: str = Query("asc", enum=["asc", "desc"]),
     domain: Optional[List[str]] = Query(None)
-    
 ):
-   
     query_filter = {}
     if domain:
         query_filter["domain"] = {"$in": domain}  # Filter by domain
 
     sort_direction = ASCENDING if sort_order == "asc" else DESCENDING
 
-    sort_field_mapping = {
-        "name": "name",
-        "date": "date",
-        "rating": "rating"
-    }
+    # Fetch courses based on domain filter
+    courses = list(Data.find(query_filter))
 
-    courses = list(Data.find(query_filter).sort(sort_field_mapping[sort_by], sort_direction))
     for course in courses:
         course.pop("_id", None)
+        total_course_rating = 0
+
+        # Calculate rating for each chapter and aggregate the course rating
+        for chapter in course.get('chapters', []):
+            chapter_rating = chapter.get('positive_ratings', 0) - chapter.get('negative_ratings', 0)
+            chapter['rating'] = chapter_rating  # Add the rating field to each chapter
+            total_course_rating += chapter_rating
+
+        # Assign the total course rating
+        course['rating'] = total_course_rating
+
+    # Sort courses based on the specified field and order
+    sort_field = sort_by
+    if sort_field == "rating":
+        courses.sort(key=lambda x: x.get(sort_field, 0), reverse=(sort_order == "desc"))
+    else:
+        courses.sort(key=lambda x: x.get(sort_field, ""), reverse=(sort_order == "desc"))
 
     return {"courses": courses}
+
+
+
 
 
  ## Endpoint to get the course overview
@@ -63,51 +77,48 @@ async def get_course_chapter(course_name: str, chapter_name: str):
 
 
 
-@router.post("/rate-chapter",response_model=schema.RateChapterResponse)
+@router.post("/rate-chapter", response_model=schema.RateChapterResponse)
 async def rate_chapter(
     course_name: str,
     chapter_name: str,
     rating: str = Body(..., embed=True, regex="^(positive|negative)$")
 ):
-    course = Data.find_one(
-        {"name": course_name, "chapters.name": chapter_name}
-    )
-
-    if not course:
-        raise HTTPException(status_code=404, detail="Course or chapter not found")
-
-    update_query = {
-        "name": course_name,
-        "chapters.name": chapter_name
-    }
-
-    if rating == "positive":
-        update_action = {"$inc": {"chapters.$.positive_ratings": 1}}
-    else:
-        update_action = {"$inc": {"chapters.$.negative_ratings": 1}}
-
-    result = Data.update_one(update_query, update_action)
-
-    if result.modified_count == 0:
+    # Increment the relevant rating
+    update_action = {"$inc": {f"chapters.$.{rating}_ratings": 1}}
+    if Data.update_one({"name": course_name, "chapters.name": chapter_name}, update_action).modified_count == 0:
         raise HTTPException(status_code=404, detail="Failed to update rating")
 
+    # Recalculate and update total_ratings
+    chapter = Data.find_one(
+        {"name": course_name, "chapters.name": chapter_name},
+        {"chapters.$": 1}
+    ).get("chapters", [])[0]
+    
+    if chapter:
+        total_ratings = chapter["positive_ratings"] + chapter["negative_ratings"]
+        Data.update_one(
+            {"name": course_name, "chapters.name": chapter_name},
+            {"$set": {"chapters.$.total_ratings": total_ratings}}
+        )
+    else:
+        raise HTTPException(status_code=404, detail="Chapter not found")
 
-    course = Data.aggregate([
+    # Aggregate course ratings
+    course_ratings = list(Data.aggregate([
         {"$match": {"name": course_name}},
         {"$unwind": "$chapters"},
         {"$group": {
             "_id": "$name",
-            "total_positive_ratings": {"$sum": "$chapters.positive_ratings"},
-            "total_negative_ratings": {"$sum": "$chapters.negative_ratings"}
+            "positive_ratings": {"$sum": "$chapters.positive_ratings"},
+            "negative_ratings": {"$sum": "$chapters.negative_ratings"}
         }}
-    ])
+    ]))
 
-    course_ratings = list(course)
     if not course_ratings:
-        raise HTTPException(status_code=404, detail="Course rating aggregation failed")
+        raise HTTPException(status_code=404, detail="Aggregation failed")
 
     return {
         "course_name": course_ratings[0]["_id"],
-        "total_positive_ratings": course_ratings[0]["total_positive_ratings"],
-        "total_negative_ratings": course_ratings[0]["total_negative_ratings"]
+        "positive_ratings": course_ratings[0]["positive_ratings"],
+        "negative_ratings": course_ratings[0]["negative_ratings"]
     }

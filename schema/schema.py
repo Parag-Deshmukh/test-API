@@ -34,8 +34,8 @@ class CourseChapter(BaseModel):
 # Model for rating chapter response
 class RateChapterResponse(BaseModel):
     course_name: str
-    total_positive_ratings: int
-    total_negative_ratings: int
+    positive_ratings: int
+    negative_ratings: int
 
 # Model for error response
 class ErrorResponse(BaseModel):
